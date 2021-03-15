@@ -1,5 +1,12 @@
 # model settings
 model = dict(
+
+
+
+
+
+
+    
     type='CascadeRCNN',
     pretrained='torchvision://resnet50',
     backbone=dict(
