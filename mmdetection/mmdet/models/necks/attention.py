@@ -226,7 +226,7 @@ class Attention(nn.Module):
         # build outputs+
         # part 1: from original levels
         outs = [
-            self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels)
+            self.fpn_convs[i](outs[i]) for i in range(used_backbone_levels)
         ]
         # part 2: add extra levels
         if self.num_outs > len(outs):
@@ -279,49 +279,54 @@ class Flatten(nn.Module):
 
 
 class ChannelAttention(nn.Module):
-    def __init__(self, gate_channels, reduction_ratio=16, pool_types=['avg', 'max']):
+    def __init__(self, gate_channels, levels, reduction_ratio=16, pool_types=['avg', 'max']):
         super(ChannelAttention, self).__init__()
         self.gate_channels = gate_channels
-        if reduction_ratio != 1:
-            self.mlp = nn.Sequential(
-                Flatten(),
-                nn.Linear(gate_channels, gate_channels // reduction_ratio),
-                nn.ReLU(),
-                nn.Linear(gate_channels // reduction_ratio, gate_channels)
-            )
-        else:
-            self.mlp = nn.Sequential(
-                Flatten(),
-                nn.Linear(gate_channels, gate_channels)
-            )
+        self.levels = levels
+        self.mlp = nn.ModuleList()
+        for _ in range(levels):
+            if reduction_ratio != 1:
+                self.mlp.append(nn.Sequential(
+                    Flatten(),
+                    nn.Linear(gate_channels, gate_channels // reduction_ratio),
+                    nn.ReLU(),
+                    nn.Linear(gate_channels // reduction_ratio, gate_channels // levels)
+                ))
+            else:
+                self.mlp.append(nn.Sequential(
+                    Flatten(),
+                    nn.Linear(gate_channels, gate_channels // levels)
+                ))
         self.pool_types = pool_types
 
     def forward(self, x):
         channel_att_sum = None
         attention = torch.cat(x, dim=1)
-        for pool_type in self.pool_types:
-            if pool_type == 'avg':
-                avg_pool = F.avg_pool2d(attention, (attention.size(2), attention.size(3)),
-                                        stride=(attention.size(2), attention.size(3)))
-                channel_att_raw = self.mlp(avg_pool)
-            elif pool_type == 'max':
-                max_pool = F.max_pool2d(attention, (attention.size(2), attention.size(3)),
-                                        stride=(attention.size(2), attention.size(3)))
-                channel_att_raw = self.mlp(max_pool)
-            elif pool_type == 'lp':
-                lp_pool = F.lp_pool2d(attention, 2, (attention.size(2), attention.size(3)),
-                                      stride=(attention.size(2), attention.size(3)))
-                channel_att_raw = self.mlp(lp_pool)
-            elif pool_type == 'lse':
-                # LSE pool only
-                lse_pool = logsumexp_2d(attention)
-                channel_att_raw = self.mlp(lse_pool)
+        scale = []
+        for i in range(self.levels):
+            for pool_type in self.pool_types:
+                if pool_type == 'avg':
+                    avg_pool = F.avg_pool2d(attention, (attention.size(2), attention.size(3)),
+                                            stride=(attention.size(2), attention.size(3)))
+                    channel_att_raw = self.mlp[i](avg_pool)
+                elif pool_type == 'max':
+                    max_pool = F.max_pool2d(attention, (attention.size(2), attention.size(3)),
+                                            stride=(attention.size(2), attention.size(3)))
+                    channel_att_raw = self.mlp[i](max_pool)
+                elif pool_type == 'lp':
+                    lp_pool = F.lp_pool2d(attention, 2, (attention.size(2), attention.size(3)),
+                                          stride=(attention.size(2), attention.size(3)))
+                    channel_att_raw = self.mlp[i](lp_pool)
+                elif pool_type == 'lse':
+                    # LSE pool only
+                    lse_pool = logsumexp_2d(attention)
+                    channel_att_raw = self.mlp[i](lse_pool)
 
-            if channel_att_sum is None:
-                channel_att_sum = channel_att_raw
-            else:
-                channel_att_sum = channel_att_sum + channel_att_raw
-        scale = torch.sigmoid(channel_att_sum).unsqueeze(2).unsqueeze(3).expand_as(attention)
+                if channel_att_sum is None:
+                    channel_att_sum = channel_att_raw
+                else:
+                    channel_att_sum = channel_att_sum + channel_att_raw
+            scale.append(torch.sigmoid(channel_att_sum).unsqueeze(2).unsqueeze(3).expand_as(x[i]))
         return scale
 
 
@@ -340,13 +345,16 @@ class ChannelPool(nn.Module):
 class SpatialAttention(nn.Module):
     def __init__(self, levels, kernel_size=7):
         super(SpatialAttention, self).__init__()
+        self.levels = levels
         self.compress = ChannelPool()
-        self.spatial = BasicConv(2 * levels, levels, kernel_size, stride=1, padding=(kernel_size - 1) // 2, relu=False)
+        self.spatial = nn.ModuleList()
+        for _ in range(levels):
+            self.spatial.append(
+                BasicConv(2 * levels, 1, kernel_size, stride=1, padding=(kernel_size - 1) // 2, relu=False))
 
     def forward(self, x):
         attention = torch.cat([(self.compress(_)) for _ in x], dim=1)
-        attention = self.spatial(attention)
-        scale = torch.sigmoid(attention)  # broadcasting
+        scale = [torch.sigmoid(self.spatial[i](attention)) for i in range(self.levels)]
         return scale
 
 
@@ -355,22 +363,19 @@ class FusionAttention(nn.Module):
                  no_channel=False, no_spatial=False):
         super(FusionAttention, self).__init__()
         self.levels = levels
-        self.channel_attention = ChannelAttention(gate_channels, reduction_ratio, pool_types)
         self.no_channel = no_channel
         self.no_spatial = no_spatial
+        if not no_channel:
+            self.channel_attention = ChannelAttention(gate_channels, levels, reduction_ratio, pool_types)
         if not no_spatial:
             self.spatial_attention = SpatialAttention(levels, kernel_size)
 
     def forward(self, x):
         if not self.no_channel:
-            channel = x[0].shape[1]
-            channel_attentionMap = self.channel_attention(x)
-            x = [x[level] * channel_attentionMap[:, channel * level:channel * (level + 1)] for level in
-                 range(self.levels)]
+            channel_attention_maps = self.channel_attention(x)
+            x = [x[level] * channel_attention_maps[level] for level in range(self.levels)]
 
         if not self.no_spatial:
-            spatial_attentionMap = self.spatial_attention(x)
-            shape = spatial_attentionMap.shape
-            x = [x[level] * spatial_attentionMap[:, level].view(shape[0], 1, shape[2], shape[3]) for level in
-                 range(self.levels)]
+            spatial_attention_maps = self.spatial_attention(x)
+            x = [x[level] * spatial_attention_maps[level] for level in range(self.levels)]
         return sum(x)
