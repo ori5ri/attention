@@ -5,10 +5,101 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.cnn import ConvModule, xavier_init
 from mmcv.runner import auto_fp16
+from .darts import genotypes as gt
 
 from ..builder import NECKS
 
-from mmdetection.mmdet.models.necks.darts.search_cell import SearchCell
+from .darts.search_cell import SearchCell
+
+
+@NECKS.register_module()
+class AttentionDarts(nn.Module):
+    """ SearchCNN controller supporting multi-gpu """
+
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 num_outs,
+                 start_level=0,
+                 end_level=-1,
+                 add_extra_convs=False,
+                 extra_convs_on_inputs=True,
+                 relu_before_extra_convs=False,
+                 no_norm_on_lateral=False,
+                 conv_cfg=None,
+                 norm_cfg=None,
+                 act_cfg=None,
+                 upsample_cfg=dict(mode='nearest'),
+                 reduction_ratio=16,
+                 kernel_size=7):
+        super(AttentionDarts, self).__init__()
+
+        # initialize architect parameters: alphas
+        n_ops = len(gt.PRIMITIVES)
+
+        self.alpha = nn.ParameterList()
+        for i in range(4):
+            self.alpha.append(nn.Parameter(1e-3 * torch.rand(n_ops)))
+
+        # setup alphas list
+        self._alphas = []
+        for n, p in self.named_parameters():
+            if 'alpha' in n:
+                self._alphas.append((n, p))
+
+        self.net = Attention(
+            in_channels,
+            out_channels,
+            num_outs,
+            start_level=start_level,
+            end_level=end_level,
+            add_extra_convs=add_extra_convs,
+            extra_convs_on_inputs=extra_convs_on_inputs,
+            relu_before_extra_convs=relu_before_extra_convs,
+            no_norm_on_lateral=no_norm_on_lateral,
+            conv_cfg=conv_cfg,
+            norm_cfg=norm_cfg,
+            act_cfg=act_cfg,
+            upsample_cfg=upsample_cfg,
+            reduction_ratio=reduction_ratio,
+            kernel_size=kernel_size
+        )
+
+    # default init_weights for conv(msra) and norm in ConvModule
+    def init_weights(self):
+        """Initialize the weights of FPN module."""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                xavier_init(m, distribution='uniform')
+
+    def forward(self, x):
+        weights = [F.softmax(alpha, dim=-1) for alpha in self.alpha]
+        return self.net(x, weights)
+
+    def genotype(self):
+        gene_level0 = gt.parse(self.alpha[0])
+        gene_level1 = gt.parse(self.alpha[1])
+        gene_level2 = gt.parse(self.alpha[2])
+        gene_level3 = gt.parse(self.alpha[3])
+
+        return gt.Genotype(
+            level0=gene_level0,
+            level1=gene_level1,
+            level2=gene_level2,
+            level3=gene_level3)
+
+    def weights(self):
+        return self.net.parameters()
+
+    def alphas(self):
+        for n, p in self._alphas:
+            yield p
+
+    def named_alphas(self):
+        for n, p in self._alphas:
+            yield n, p
+
+
 # from models.search_cells import SearchCell
 
 class Attention(nn.Module):
@@ -251,85 +342,3 @@ class Attention(nn.Module):
         return tuple(outs)
 
 
-@NECKS.register_module()
-class SearchAttentionController(nn.Module):
-    """ SearchCNN controller supporting multi-gpu """
-    def __init__(self,  
-                 in_channels,
-                 out_channels,
-                 num_outs,
-                 start_level=0,
-                 end_level=-1,
-                 add_extra_convs=False,
-                 extra_convs_on_inputs=True,
-                 relu_before_extra_convs=False,
-                 no_norm_on_lateral=False,
-                 conv_cfg=None,
-                 norm_cfg=None,
-                 act_cfg=None,
-                 upsample_cfg=dict(mode='nearest'),
-                 reduction_ratio=16,
-                 kernel_size=7
-                 ):
-        super().__init__()
-
-        # initialize architect parameters: alphas
-        n_ops = len(gt.PRIMITIVES)
-
-        self.alphas = []
-        for i in range(4):
-            alpha_level = nn.ParameterList()
-            alpha_level.append(nn.Parameter(1e-3*torch.randn(n_ops)))
-            self.alphas.append(alpha_level)
-
-        # setup alphas list
-        # self._alphas = []
-        # for n, p in self.named_parameters():
-        #     if 'alpha' in n:
-        #         self._alphas.append((n, p))
-
-        self.net = Attention(
-                 in_channels,
-                 out_channels,
-                 num_outs,
-                 start_level=0,
-                 end_level=-1,
-                 add_extra_convs=False,
-                 extra_convs_on_inputs=True,
-                 relu_before_extra_convs=False,
-                 no_norm_on_lateral=False,
-                 conv_cfg=None,
-                 norm_cfg=None,
-                 act_cfg=None,
-                 upsample_cfg=dict(mode='nearest'),
-                 reduction_ratio=16,
-                 kernel_size=7
-        )
-
-    def forward(self, x):
-        weights= [F.softmax(alpha, dim=-1) for alpha in self.alphas]
-        return self.net(x, weights)
-
-    def genotype(self):
-        gene_level0 = gt.parse(self.alphas[0])
-        gene_level1 = gt.parse(self.alphas[1])
-        gene_level2 = gt.parse(self.alphas[2])
-        gene_level3 = gt.parse(self.alphas[3])
-
-        return gt.Genotype(
-            level0 = gene_level0,
-            level1 = gene_level1,
-            level2 = gene_level2,
-            level3 = gene_level3)
-
-    def weights(self):
-        return self.net.parameters()
-
-
-    def alphas(self):
-        for n, p in self._alphas:
-            yield p
-
-    def named_alphas(self):
-        for n, p in self._alphas:
-            yield n, p

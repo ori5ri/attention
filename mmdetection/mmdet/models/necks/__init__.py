@@ -10,8 +10,9 @@ from .pafpn import PAFPN
 from .rfp import RFP
 from .yolo_neck import YOLOV3Neck
 from .attention import Attention
+from .attention_darts import AttentionDarts
 
 __all__ = [
     'FPN', 'BFP', 'ChannelMapper', 'HRFPN', 'NASFPN', 'FPN_CARAFE', 'PAFPN',
-    'NASFCOS_FPN', 'RFP', 'YOLOV3Neck', 'FPG', 'Attention'
+    'NASFCOS_FPN', 'RFP', 'YOLOV3Neck', 'FPG', 'Attention', 'AttentionDarts'
 ]
