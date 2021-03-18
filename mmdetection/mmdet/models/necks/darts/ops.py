@@ -1,16 +1,17 @@
 """ Operations """
 import torch
 import torch.nn as nn
-import mmdetection.mmdet.models.necks.darts.genotypes as gt
+from . import genotypes as gt
+import torch.nn.functional as F
 # import genotypes as gt
 
 OPS = {
     'total': lambda gate_channels, levels, reduction_ratio, kernel_size : 
-    FusionAttention(gate_channels=gate_channels, levels=levels, reduction_ratio=reduction_ratio, kernel_size=kernel_size)
+    FusionAttention(gate_channels=gate_channels, levels=levels, reduction_ratio=reduction_ratio, kernel_size=kernel_size),
     'channel': lambda gate_channels, levels, reduction_ratio, kernel_size : 
-    FusionAttention(gate_channels=gate_channels, levels=levels, reduction_ratio=reduction_ratio, kernel_size=kernel_size, no_spatial=True)
+    FusionAttention(gate_channels=gate_channels, levels=levels, reduction_ratio=reduction_ratio, kernel_size=kernel_size, no_spatial=True),
     'spatial': lambda gate_channels, levels, reduction_ratio, kernel_size : 
-    FusionAttention(gate_channels=gate_channels, levels=levels, reduction_ratio=reduction_ratio, kernel_size=kernel_size, no_channel=True)
+    FusionAttention(gate_channels=gate_channels, levels=levels, reduction_ratio=reduction_ratio, kernel_size=kernel_size, no_channel=True),
     'identity': lambda gate_channels, levels, reduction_ratio, kernel_size : 
     FusionAttention(gate_channels=gate_channels, levels=levels, reduction_ratio=reduction_ratio, kernel_size=kernel_size, no_channel=True, no_spatial=True)
 }
