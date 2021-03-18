@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from mmdetection.mmdet.models.necks.darts import ops
+from . import ops
 # from models import ops
 
 
