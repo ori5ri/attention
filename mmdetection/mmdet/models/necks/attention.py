@@ -303,24 +303,22 @@ class ChannelAttention(nn.Module):
 
     def forward(self, x):
         channel_att_sum = None
+        attention = torch.cat(x, dim=1)
         scale = []
         for i in range(self.levels):
             for pool_type in self.pool_types:
                 if pool_type == 'avg':
-                    avg_pool = torch.cat([F.avg_pool2d(attention, (attention.size(2), attention.size(3)),
-                                            stride=(attention.size(2), attention.size(3))) for attention in x], dim=1)
+                    avg_pool = F.avg_pool2d(attention, (attention.size(2), attention.size(3)), stride=(attention.size(2), attention.size(3)))
                     channel_att_raw = self.mlp[i](avg_pool)
                 elif pool_type == 'max':
-                    max_pool = torch.cat([F.max_pool2d(attention, (attention.size(2), attention.size(3)),
-                                            stride=(attention.size(2), attention.size(3))) for attention in x], dim=1)
+                    max_pool = F.max_pool2d(attention, (attention.size(2), attention.size(3)), stride=(attention.size(2), attention.size(3)))
                     channel_att_raw = self.mlp[i](max_pool)
                 elif pool_type == 'lp':
-                    lp_pool = torch.cat([F.lp_pool2d(attention, 2, (attention.size(2), attention.size(3)),
-                                          stride=(attention.size(2), attention.size(3))) for attention in x], dim=1)
+                    lp_pool = F.lp_pool2d(attention, 2, (attention.size(2), attention.size(3)), stride=(attention.size(2), attention.size(3)))
                     channel_att_raw = self.mlp[i](lp_pool)
                 elif pool_type == 'lse':
                     # LSE pool only
-                    lse_pool = logsumexp_2d(torch.cat(x, dim=1))
+                    lse_pool = logsumexp_2d(attention)
                     channel_att_raw = self.mlp[i](lse_pool)
 
                 if channel_att_sum is None:
