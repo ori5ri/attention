@@ -83,7 +83,7 @@ class Attention(nn.Module):
                  no_channel=False,
                  no_spatial=False,
                  stacking=1,
-                 residual=True):
+                 residual=False):
         super(Attention, self).__init__()
         assert isinstance(in_channels, list)
         self.in_channels = in_channels
