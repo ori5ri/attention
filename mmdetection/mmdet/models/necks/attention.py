@@ -305,7 +305,7 @@ class ChannelAttention(nn.Module):
 
     def forward(self, x):
         channel_att_sum = None
-        attention = torch.cat(x, dim=1).clone().detach()
+        attention = torch.cat(x, dim=1)
         scale = []
         for i in range(self.levels):
             for pool_type in self.pool_types:

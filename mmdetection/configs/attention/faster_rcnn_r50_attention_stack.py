@@ -10,6 +10,5 @@ model = dict(
         in_channels=[256, 512, 1024, 2048],
         out_channels=256,
         stacking=2,
-        num_outs=5,
-        residual=True)
+        num_outs=5)
 )
