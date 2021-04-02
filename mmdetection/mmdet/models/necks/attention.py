@@ -83,7 +83,9 @@ class Attention(nn.Module):
                  no_channel=False,
                  no_spatial=False,
                  stacking=1,
-                 residual=False):
+                 residual=False,
+                 map_repeated=1,
+                 map_residual=False):
         super(Attention, self).__init__()
         assert isinstance(in_channels, list)
         self.in_channels = in_channels
@@ -130,7 +132,9 @@ class Attention(nn.Module):
                     no_channel=no_channel,
                     no_spatial=no_spatial,
                     stacking=stacking,
-                    residual=residual
+                    residual=residual,
+                    map_repeated=map_repeated,
+                    map_residual=map_residual
                 )
             )
             self.downsample_convs.append(d_conv)
@@ -283,51 +287,59 @@ class Flatten(nn.Module):
 
 
 class ChannelAttention(nn.Module):
-    def __init__(self, gate_channels, levels, reduction_ratio=16, pool_types=['avg', 'max']):
+    def __init__(self, gate_channels, levels, reduction_ratio=16, pool_types=['avg', 'max'], map_repeated=1,
+                 map_residual=False):
         super(ChannelAttention, self).__init__()
+        assert all(pool_type in ['avg', 'max', 'lp', 'lse'] for pool_type in pool_types)
         self.gate_channels = gate_channels
         self.levels = levels
         self.mlp = nn.ModuleList()
-        for _ in range(levels):
-            if reduction_ratio != 1:
-                self.mlp.append(nn.Sequential(
+        self.map_repeated = map_repeated
+        self.map_residual = map_residual
+        for i in range(map_repeated):
+            self.mlp.append(nn.ModuleList())
+            for _ in range(levels):
+                self.mlp[i].append(nn.Sequential(
                     Flatten(),
                     nn.Linear(gate_channels, gate_channels // reduction_ratio),
                     nn.ReLU(),
                     nn.Linear(gate_channels // reduction_ratio, gate_channels // levels)
-                ))
-            else:
-                self.mlp.append(nn.Sequential(
-                    Flatten(),
-                    nn.Linear(gate_channels, gate_channels // levels)
                 ))
         self.pool_types = pool_types
 
     def forward(self, x):
         channel_att_sum = None
         attention = torch.cat(x, dim=1)
-        scale = []
-        for i in range(self.levels):
-            for pool_type in self.pool_types:
-                if pool_type == 'avg':
-                    avg_pool = F.avg_pool2d(attention, (attention.size(2), attention.size(3)), stride=(attention.size(2), attention.size(3)))
-                    channel_att_raw = self.mlp[i](avg_pool)
-                elif pool_type == 'max':
-                    max_pool = F.max_pool2d(attention, (attention.size(2), attention.size(3)), stride=(attention.size(2), attention.size(3)))
-                    channel_att_raw = self.mlp[i](max_pool)
-                elif pool_type == 'lp':
-                    lp_pool = F.lp_pool2d(attention, 2, (attention.size(2), attention.size(3)), stride=(attention.size(2), attention.size(3)))
-                    channel_att_raw = self.mlp[i](lp_pool)
-                elif pool_type == 'lse':
-                    # LSE pool only
-                    lse_pool = logsumexp_2d(attention)
-                    channel_att_raw = self.mlp[i](lse_pool)
 
-                if channel_att_sum is None:
-                    channel_att_sum = channel_att_raw
-                else:
-                    channel_att_sum = channel_att_sum + channel_att_raw
-            scale.append(torch.sigmoid(channel_att_sum).unsqueeze(2).unsqueeze(3).expand_as(x[i]))
+        for pool_type in self.pool_types:
+            if pool_type == 'avg':
+                pool = F.avg_pool2d(attention, (attention.size(2), attention.size(3)),
+                                    stride=(attention.size(2), attention.size(3)))
+            elif pool_type == 'max':
+                pool = F.max_pool2d(attention, (attention.size(2), attention.size(3)),
+                                    stride=(attention.size(2), attention.size(3)))
+            elif pool_type == 'lp':
+                pool = F.lp_pool2d(attention, 2, (attention.size(2), attention.size(3)),
+                                   stride=(attention.size(2), attention.size(3)))
+            elif pool_type == 'lse':  # LSE pool only
+                pool = logsumexp_2d(attention)
+
+            channel_att_raw = [torch.sigmoid(self.mlp[0][j](pool)) for j in range(self.levels)]
+
+            if channel_att_sum is None:
+                channel_att_sum = channel_att_raw
+            else:
+                channel_att_sum = [raw + sum for raw, sum in zip(channel_att_raw, channel_att_sum)]
+
+        for i in range(1, self.map_repeated):
+            attention = torch.cat(channel_att_sum, dim=1)
+            if self.map_residual:
+                channel_att_sum = [torch.sigmoid(self.mlp[i][j](attention)) + channel_att_sum[j] for j in range(self.levels)]
+            else:
+                channel_att_sum = [torch.sigmoid(self.mlp[i][j](attention)) for j in range(self.levels)]
+
+        scale = [sum.unsqueeze(2).unsqueeze(3).expand_as(x[0]) for sum in channel_att_sum]
+
         return scale
 
 
@@ -344,24 +356,41 @@ class ChannelPool(nn.Module):
 
 
 class SpatialAttention(nn.Module):
-    def __init__(self, levels, kernel_size=7):
+    def __init__(self, levels, kernel_size=7, map_repeated=1, map_residual=False):
         super(SpatialAttention, self).__init__()
         self.levels = levels
+        self.map_repeated = map_repeated
+        self.map_residual = map_residual
         self.compress = ChannelPool()
         self.spatial = nn.ModuleList()
-        for _ in range(levels):
-            self.spatial.append(
-                BasicConv(2 * levels, 1, kernel_size, stride=1, padding=(kernel_size - 1) // 2, relu=False))
+        for i in range(map_repeated):
+            self.spatial.append(nn.ModuleList())
+            for _ in range(levels):
+                if i == 0:
+                    in_channel = 2 * levels
+                else:
+                    in_channel = levels
+                self.spatial[i].append(
+                    BasicConv(in_channel, 1, kernel_size, stride=1, padding=(kernel_size - 1) // 2, relu=False))
 
     def forward(self, x):
-        attention = torch.cat([(self.compress(_)) for _ in x], dim=1)
-        scale = [torch.sigmoid(self.spatial[i](attention)) for i in range(self.levels)]
+        for i in range(self.map_repeated):
+            if i == 0:
+                attention = torch.cat([(self.compress(_)) for _ in x], dim=1)
+            else:
+                attention = torch.cat(scale, dim=1)
+
+            if self.map_residual and i != 0:
+                scale = [torch.sigmoid(self.spatial[i][j](attention)) + scale[j] for j in range(self.levels)]
+            else:
+                scale = [torch.sigmoid(self.spatial[i][j](attention)) for j in range(self.levels)]
+
         return scale
 
 
 class FusionAttention(nn.Module):
     def __init__(self, gate_channels, levels, reduction_ratio=16, kernel_size=7, pool_types=['avg', 'max'],
-                 no_channel=False, no_spatial=False, stacking=1, residual=True):
+                 no_channel=False, no_spatial=False, stacking=1, residual=False, map_repeated=1, map_residual=False):
         super(FusionAttention, self).__init__()
         assert 1 <= stacking
         self.levels = levels
@@ -373,12 +402,13 @@ class FusionAttention(nn.Module):
         if not no_channel:
             self.channel_attention = nn.ModuleList()
             for _ in range(stacking):
-                self.channel_attention.append(ChannelAttention(gate_channels, levels, reduction_ratio, pool_types))
+                self.channel_attention.append(ChannelAttention(
+                    gate_channels, levels, reduction_ratio, pool_types, map_repeated, map_residual))
 
         if not no_spatial:
             self.spatial_attention = nn.ModuleList()
             for _ in range(stacking):
-                self.spatial_attention.append(SpatialAttention(levels, kernel_size))
+                self.spatial_attention.append(SpatialAttention(levels, kernel_size, map_repeated, map_residual))
 
     def forward(self, x):
         for i in range(self.stacking):
