@@ -294,17 +294,13 @@ class ChannelAttention(nn.Module):
         self.gate_channels = gate_channels
         self.levels = levels
         self.mlp = nn.ModuleList()
-        self.map_repeated = map_repeated
-        self.map_residual = map_residual
-        for i in range(map_repeated):
-            self.mlp.append(nn.ModuleList())
-            for _ in range(levels):
-                self.mlp[i].append(nn.Sequential(
-                    Flatten(),
-                    nn.Linear(gate_channels, gate_channels // reduction_ratio),
-                    nn.ReLU(),
-                    nn.Linear(gate_channels // reduction_ratio, gate_channels // levels)
-                ))
+        for _ in range(levels):
+            self.mlp.append(nn.Sequential(
+                Flatten(),
+                nn.Linear(gate_channels, gate_channels // reduction_ratio),
+                nn.ReLU(),
+                nn.Linear(gate_channels // reduction_ratio, gate_channels // levels)
+            ))
         self.pool_types = pool_types
 
     def forward(self, x):
@@ -324,19 +320,14 @@ class ChannelAttention(nn.Module):
             elif pool_type == 'lse':  # LSE pool only
                 pool = logsumexp_2d(attention)
 
-            channel_att_raw = [torch.sigmoid(self.mlp[0][j](pool)) for j in range(self.levels)]
+            channel_att_raw = [self.mlp[j](pool) for j in range(self.levels)]
 
             if channel_att_sum is None:
                 channel_att_sum = channel_att_raw
             else:
                 channel_att_sum = [raw + sum for raw, sum in zip(channel_att_raw, channel_att_sum)]
 
-        for i in range(1, self.map_repeated):
-            attention = torch.cat(channel_att_sum, dim=1)
-            if self.map_residual:
-                channel_att_sum = [torch.sigmoid(self.mlp[i][j](attention)) + channel_att_sum[j] for j in range(self.levels)]
-            else:
-                channel_att_sum = [torch.sigmoid(self.mlp[i][j](attention)) for j in range(self.levels)]
+        channel_att_sum = [torch.sigmoid(att_sum) for att_sum in channel_att_sum]
 
         scale = [sum.unsqueeze(2).unsqueeze(3).expand_as(x[0]) for sum in channel_att_sum]
 
@@ -363,27 +354,13 @@ class SpatialAttention(nn.Module):
         self.map_residual = map_residual
         self.compress = ChannelPool()
         self.spatial = nn.ModuleList()
-        for i in range(map_repeated):
-            self.spatial.append(nn.ModuleList())
-            for _ in range(levels):
-                if i == 0:
-                    in_channel = 2 * levels
-                else:
-                    in_channel = levels
-                self.spatial[i].append(
-                    BasicConv(in_channel, 1, kernel_size, stride=1, padding=(kernel_size - 1) // 2, relu=False))
+        for _ in range(levels):
+            self.spatial.append(
+                BasicConv(2 * levels, 1, kernel_size, stride=1, padding=(kernel_size - 1) // 2, relu=False))
 
     def forward(self, x):
-        for i in range(self.map_repeated):
-            if i == 0:
-                attention = torch.cat([(self.compress(_)) for _ in x], dim=1)
-            else:
-                attention = torch.cat(scale, dim=1)
-
-            if self.map_residual and i != 0:
-                scale = [torch.sigmoid(self.spatial[i][j](attention)) + scale[j] for j in range(self.levels)]
-            else:
-                scale = [torch.sigmoid(self.spatial[i][j](attention)) for j in range(self.levels)]
+        attention = torch.cat([(self.compress(_)) for _ in x], dim=1)
+        scale = [torch.sigmoid(self.spatial[j](attention)) for j in range(self.levels)]
 
         return scale
 
@@ -398,29 +375,42 @@ class FusionAttention(nn.Module):
         self.no_spatial = no_spatial
         self.stacking = stacking
         self.residual = residual
+        self.map_repeated = map_repeated
 
         if not no_channel:
             self.channel_attention = nn.ModuleList()
             for _ in range(stacking):
-                self.channel_attention.append(ChannelAttention(
-                    gate_channels, levels, reduction_ratio, pool_types, map_repeated, map_residual))
+                self.channel_attention.append(nn.ModuleList())
+                for _ in range(map_repeated):
+                    self.channel_attention[-1].append(ChannelAttention(
+                        gate_channels, levels, reduction_ratio, pool_types, map_repeated, map_residual))
 
         if not no_spatial:
             self.spatial_attention = nn.ModuleList()
             for _ in range(stacking):
-                self.spatial_attention.append(SpatialAttention(levels, kernel_size, map_repeated, map_residual))
+                self.spatial_attention.append(nn.ModuleList())
+                for _ in range(map_repeated):
+                    self.spatial_attention[-1].append(SpatialAttention(levels, kernel_size, map_repeated, map_residual))
 
     def forward(self, x):
         for i in range(self.stacking):
             if not self.no_channel:
-                channel_attention_maps = self.channel_attention[i](x)
+                channel_attention_maps = self.channel_attention[i][0](x)
+                for repeated in range(1, self.map_repeated):
+                    channel_attention_maps2 = self.channel_attention[i][repeated](channel_attention_maps)
+                    channel_attention_maps = [maps + maps2
+                                              for maps, maps2 in zip(channel_attention_maps, channel_attention_maps2)]
                 if self.residual:
                     x = [x[level] * channel_attention_maps[level] + x[level] for level in range(self.levels)]
                 else:
                     x = [x[level] * channel_attention_maps[level] for level in range(self.levels)]
 
             if not self.no_spatial:
-                spatial_attention_maps = self.spatial_attention[i](x)
+                spatial_attention_maps = self.spatial_attention[i][0](x)
+                for repeated in range(1, self.map_repeated):
+                    spatial_attention_maps2 = self.spatial_attention[i][repeated](spatial_attention_maps)
+                    spatial_attention_maps = [maps + maps2
+                                              for maps, maps2 in zip(spatial_attention_maps, spatial_attention_maps2)]
                 if self.residual:
                     x = [x[level] * spatial_attention_maps[level] + x[level] for level in range(self.levels)]
                 else:
