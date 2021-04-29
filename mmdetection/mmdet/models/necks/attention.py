@@ -145,7 +145,9 @@ class Attention(nn.Module):
             elif attention_type == 'context':
                 self.fusion_attentions.append(
                     ContextBlock(inplanes=out_channels * (self.num_ins - start_level),
-                                 levels=self.num_ins - start_level)
+                                 levels=self.num_ins - start_level,
+                                 repeated=map_repeated,
+                                 residual=map_residual)
                 )
 
             self.downsample_convs.append(d_conv)
