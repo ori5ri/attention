@@ -15,6 +15,8 @@ class ContextBlock(nn.Module):
     def __init__(self,
                  inplanes,
                  levels,
+                 repeated=1,
+                 residual=False,
                  ratio=1. / 4,
                  pooling_type='att',
                  fusion_types=('channel_add', 'channel_mul')):
@@ -25,6 +27,8 @@ class ContextBlock(nn.Module):
         assert all([f in valid_fusion_types for f in fusion_types])
         assert len(fusion_types) > 0, 'at least one fusion should be used'
         assert levels > 0, 'at least one feature should be used'
+        self.repeated = repeated
+        self.residual = residual
         self.inplanes = inplanes
         self.ratio = ratio
         self.planes = int(inplanes * ratio)
@@ -38,22 +42,26 @@ class ContextBlock(nn.Module):
             self.avg_pool = nn.AdaptiveAvgPool2d(1)
         if 'channel_add' in fusion_types:
             self.channel_add_conv = nn.ModuleList()
-            for level in range(self.levels):
-                self.channel_add_conv.append(nn.Sequential(
-                    nn.Conv2d(self.inplanes, self.planes, kernel_size=1),
-                    nn.LayerNorm([self.planes, 1, 1]),
-                    nn.ReLU(inplace=True),  # yapf: disable
-                    nn.Conv2d(self.planes, self.inplanes // self.levels, kernel_size=1)))
+            for i in range(self.repeated):
+                self.channel_add_conv.append(nn.ModuleList())
+                for level in range(self.levels):
+                    self.channel_add_conv[i].append(nn.Sequential(
+                        nn.Conv2d(self.inplanes, self.planes, kernel_size=1),
+                        nn.LayerNorm([self.planes, 1, 1]),
+                        nn.ReLU(inplace=True),  # yapf: disable
+                        nn.Conv2d(self.planes, self.inplanes // self.levels, kernel_size=1)))
         else:
             self.channel_add_conv = None
         if 'channel_mul' in fusion_types:
             self.channel_mul_conv = nn.ModuleList()
-            for level in range(self.levels):
-                self.channel_mul_conv.append(nn.Sequential(
-                    nn.Conv2d(self.inplanes, self.planes, kernel_size=1),
-                    nn.LayerNorm([self.planes, 1, 1]),
-                    nn.ReLU(inplace=True),  # yapf: disable
-                    nn.Conv2d(self.planes, self.inplanes // self.levels, kernel_size=1)))
+            for i in range(self.repeated):
+                self.channel_mul_conv.append(nn.ModuleList())
+                for level in range(self.levels):
+                    self.channel_mul_conv[i].append(nn.Sequential(
+                        nn.Conv2d(self.inplanes, self.planes, kernel_size=1),
+                        nn.LayerNorm([self.planes, 1, 1]),
+                        nn.ReLU(inplace=True),  # yapf: disable
+                        nn.Conv2d(self.planes, self.inplanes // self.levels, kernel_size=1)))
         else:
             self.channel_mul_conv = None
         self.reset_parameters()
@@ -102,11 +110,25 @@ class ContextBlock(nn.Module):
 
         if self.channel_mul_conv is not None:
             # [N, C, 1, 1]
-            # channel_mul_term = torch.sigmoid(self.channel_mul_conv(context))
-            outs = [out * torch.sigmoid(self.channel_mul_conv[i](context)) for i, out in enumerate(outs)]
+            mul_maps = [torch.sigmoid(self.channel_mul_conv[0][i](context)) for i in range(self.levels)]
+            for repeat in range(1, self.repeated):
+                if self.residual:
+                    mul_maps_ = [torch.sigmoid(self.channel_mul_conv[repeat][i](torch.cat(mul_maps, dim=1)))
+                                 for i in range(self.levels)]
+                    mul_maps = [mul_map + mul_map_ for mul_map, mul_map_ in zip(mul_maps, mul_maps_)]
+                else:
+                    mul_maps = [torch.sigmoid(self.channel_mul_conv[repeat][i](torch.cat(mul_maps, dim=1)))
+                                for i in range(self.levels)]
+            outs = [out * mul_map for out, mul_map in zip(outs, mul_maps)]
         if self.channel_add_conv is not None:
             # [N, C, 1, 1]
-            # channel_add_term = self.channel_add_conv(context)
-            outs = [out + self.channel_add_conv[i](context) for i, out in enumerate(outs)]
+            add_maps = [self.channel_add_conv[0][i](context) for i in range(self.levels)]
+            for repeat in range(1, self.repeated):
+                if self.residual:
+                    add_maps_ = [self.channel_add_conv[repeat][i](torch.cat(add_maps, dim=1)) for i in range(self.levels)]
+                    add_maps = [add_map + add_map_ for add_map, add_map_ in zip(add_maps, add_maps_)]
+                else:
+                    add_maps = [self.channel_add_conv[repeat][i](torch.cat(add_maps, dim=1)) for i in range(self.levels)]
+            outs = [out + add_map for out, add_map in zip(outs, add_maps)]
 
         return sum(outs)
