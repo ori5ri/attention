@@ -8,7 +8,7 @@ from mmcv.runner import auto_fp16
 from .attention_module.fusion_attention import FusionAttention
 from .attention_module.context_fusion_block import ContextBlock
 from .attention_module.attention_augmented import AugmentedAttention
-
+from .attention_module.self_attention import SelfAttention
 from ..builder import NECKS
 
 
@@ -92,7 +92,7 @@ class Attention(nn.Module):
                  map_residual=False):
         super(Attention, self).__init__()
         assert isinstance(in_channels, list)
-        assert attention_type in ['fusion', 'context','augmented']
+        assert attention_type in ['fusion', 'context','augmented', 'self']
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.num_ins = len(in_channels)
@@ -151,6 +151,13 @@ class Attention(nn.Module):
             elif attention_type == 'augmented':
                 self.fusion_attentions.append(
                     AugmentedAttention(levels = self.num_ins - start_level, 
+                                        in_channels = out_channels * (self.num_ins - start_level), 
+                                        out_channels = out_channels,
+                                        map_repeated=map_repeated)
+                )
+            elif attention_type == 'self':
+                self.fusion_attentions.append(
+                    SelfAttention(levels = self.num_ins - start_level, 
                                         in_channels = out_channels * (self.num_ins - start_level), 
                                         out_channels = out_channels)
                 )

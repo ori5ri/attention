@@ -2,31 +2,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-class AugmentedConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, dk=40, dv=4, Nh=4, shape=8, relative=False, stride=4):
-        super(AugmentedConv, self).__init__()
+class SelfAttentionBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, dk=1024, dv=1024, Nh=4, shape=1, relative=True):
+        super(SelfAttentionBlock, self).__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.kernel_size = kernel_size
         self.dk = dk
         self.dv = dv
         self.Nh = Nh
         self.shape = shape
         self.relative = relative
-        self.stride = stride
-        self.padding = (self.kernel_size - 1) // 2
 
         assert self.Nh != 0, "integer division or modulo by zero, Nh >= 1"
         assert self.dk % self.Nh == 0, "dk should be divided by Nh. (example: out_channels: 20, dk: 40, Nh: 4)"
         assert self.dv % self.Nh == 0, "dv should be divided by Nh. (example: out_channels: 20, dv: 4, Nh: 4)"
-        assert stride in [1, 2, 3,4], str(stride) + " Up to 2 strides are allowed."
 
-        self.conv_out = nn.Conv2d(self.in_channels, self.out_channels - self.dv, self.kernel_size, stride=stride, padding=self.padding)
-
-        self.qkv_conv = nn.Conv2d(self.in_channels, 2 * self.dk + self.dv, kernel_size=self.kernel_size, stride=stride, padding=self.padding)
-
-        self.attn_out = nn.Conv2d(self.dv, self.dv, kernel_size=1, stride=1)
+        self.qkv_conv = nn.Conv2d(self.dk,self.dk, kernel_size=1, stride=1)
+        self.attn_out = nn.Conv2d(self.dv, 256, kernel_size=1, stride=1)
 
         if self.relative:
             self.key_rel_w = nn.Parameter(torch.randn((2 * self.shape - 1, dk // Nh), requires_grad=True))
@@ -35,12 +27,7 @@ class AugmentedConv(nn.Module):
     def forward(self, x):
         # Input x
         # (batch_size, channels, height, width)
-        batch_x, _, height_x, width_x = x.size()
-
-        # conv_out
-        # (batch_size, out_channels, height, width)
-        conv_out = self.conv_out(x)
-        batch, _, height, width = conv_out.size()
+        batch, _, height, width = x.size() # (B, C*4, H, W)
 
         # flat_q, flat_k, flat_v
         # (batch_size, Nh, height * width, dvh or dkh)
@@ -48,39 +35,41 @@ class AugmentedConv(nn.Module):
         # q, k, v
         # (batch_size, Nh, height, width, dv or dk)
         flat_q, flat_k, flat_v, q, k, v = self.compute_flat_qkv(x, self.dk, self.dv, self.Nh)
-        logits = torch.matmul(flat_q.transpose(2, 3), flat_k) # (4,4,1600,10) * (4,4,10,1600)
+        logits = torch.matmul(flat_q.transpose(2,3), flat_k) # (4, 4, 1, 1)
         if self.relative:
             h_rel_logits, w_rel_logits = self.relative_logits(q)
             logits += h_rel_logits
             logits += w_rel_logits
-        weights = F.softmax(logits, dim=-1) # (4, 4, 1600, 1600)
+        weights = F.softmax(logits, dim=-1)  # (4, 4, 1, 1)
 
         # attn_out
         # (batch, Nh, height * width, dvh)
-        attn_out = torch.matmul(weights, flat_v.transpose(2, 3)) # (4,4,1600,1)
-        attn_out = torch.reshape(attn_out, (batch, self.Nh, self.dv // self.Nh, height, width)) # (4, 4, 1, 40, 40)
+        attn_out = torch.matmul(weights, flat_v.transpose(2, 3)) # (4,4,1,256)
+        attn_out = torch.reshape(attn_out, (batch, self.Nh, self.dv // self.Nh, 1, 1)) #(4,4,256,1,1)
         # combine_heads_2d
         # (batch, out_channels, height, width)
-        attn_out = self.combine_heads_2d(attn_out) # (4, 4, 40, 40)
-        attn_out = self.attn_out(attn_out) # (4, 4, 40, 40)
-        attention = torch.cat((conv_out, attn_out), dim=1)
+        attn_out = self.combine_heads_2d(attn_out) # (4, 1024, 1 1)
+        attn_out = self.attn_out(attn_out) # (4, 256, 1 1)
 
-        attention = F.interpolate(attention, size=(height_x, width_x),mode = 'bilinear', align_corners = True)
-        return attention
+        return attn_out
 
     def compute_flat_qkv(self, x, dk, dv, Nh):
-        qkv = self.qkv_conv(x)
-        N, _, H, W = qkv.size() # (B, 84, 40, 40)
-        q, k, v = torch.split(qkv, [dk, dk, dv], dim=1)
-        q = self.split_heads_2d(q, Nh)
-        k = self.split_heads_2d(k, Nh)
-        v = self.split_heads_2d(v, Nh)
+        # qkv = self.qkv_conv(x)
+        batch_x, channel_x, height_x, width_x = x.size()
+
+        pool = F.avg_pool2d(x, (height_x, width_x), stride = (height_x, width_x)) # (B, C*4, 1, 1)
+        pool = self.qkv_conv(pool)
+        N, _, H, W = pool.size()
+        # q, k, v = torch.split(qkv, [dk, dk, dv], dim=1)
+        q = self.split_heads_2d(pool, Nh)
+        k = self.split_heads_2d(pool, Nh)
+        v = self.split_heads_2d(pool, Nh)
 
         dkh = dk // Nh
         q *= dkh ** -0.5
-        flat_q = torch.reshape(q, (N, Nh, dk // Nh, H * W)) # (4, 4, 10, 1600)
-        flat_k = torch.reshape(k, (N, Nh, dk // Nh, H * W)) # (4, 4, 10, 1600)
-        flat_v = torch.reshape(v, (N, Nh, dv // Nh, H * W)) # (4, 4, 1, 1600)
+        flat_q = torch.reshape(q, (N, Nh, dk // Nh, H * W)) # (4,4,256,1)
+        flat_k = torch.reshape(k, (N, Nh, dk // Nh, H * W)) # (4,4,256,1)
+        flat_v = torch.reshape(v, (N, Nh, dv // Nh, H * W)) # (4,4,256,1)
         return flat_q, flat_k, flat_v, q, k, v
 
     def split_heads_2d(self, x, Nh):
@@ -133,30 +122,19 @@ class AugmentedConv(nn.Module):
         final_x = final_x[:, :, :L, L - 1:]
         return final_x
 
-class AugmentedAttention(nn.Module):
-    def __init__(self, levels, in_channels, out_channels, map_repeated):
-        super(AugmentedAttention, self).__init__()
+class SelfAttention(nn.Module):
+    def __init__(self, levels, in_channels, out_channels):
+        super(SelfAttention, self).__init__()
         self.levels = levels
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.map_repeated = map_repeated
-
-        self.augmented = nn.ModuleList()
-        for i in range(map_repeated):
-            self.augmented.append(nn.ModuleList())
-            for _ in range(levels):
-                self.augmented[i].append(AugmentedConv(in_channels, out_channels))
+        self.attentions = nn.ModuleList()
 
     def forward(self, x) :
         outs = x
         x = torch.cat(x, dim=1)
-        # (4,256,54,54)
 
-        attention_maps = [self.augmented[0][j](x) for j in range(self.levels)]
-        for repeated in range(1, self.map_repeated):
-            attention_maps2 = [self.augmented[repeated][j](x) for j in range(self.levels)]
-            attention_maps = [maps + maps2 for maps, maps2 in zip(attention_maps, attention_maps2)]
-        
+        attention_maps = [self.attentions[j](x) for j in range(self.levels)]    
         outs = [outs[level] * attention_maps[level] for level in range(self.levels)]
         
         return sum(outs)
