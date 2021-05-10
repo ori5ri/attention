@@ -89,7 +89,8 @@ class Attention(nn.Module):
                  stacking=1,
                  residual=False,
                  map_repeated=1,
-                 map_residual=False):
+                 map_residual=False,
+                 weight_type=False):
         super(Attention, self).__init__()
         assert isinstance(in_channels, list)
         assert attention_type in ['fusion', 'context','augmented', 'self']
@@ -146,7 +147,10 @@ class Attention(nn.Module):
             elif attention_type == 'context':
                 self.fusion_attentions.append(
                     ContextBlock(inplanes=out_channels * (self.num_ins - start_level),
-                                 levels=self.num_ins - start_level)
+                                 levels=self.num_ins - start_level,
+                                 repeated=map_repeated,
+                                 residual=map_residual,
+                                 weight_type=weight_type)
                 )
             elif attention_type == 'augmented':
                 self.fusion_attentions.append(
