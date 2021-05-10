@@ -11,7 +11,6 @@ def last_zero_init(m):
 
 
 class ContextBlock(nn.Module):
-
     def __init__(self,
                  inplanes,
                  levels,
@@ -19,7 +18,9 @@ class ContextBlock(nn.Module):
                  residual=False,
                  ratio=1. / 4,
                  pooling_type='att',
-                 fusion_types=('channel_add', 'channel_mul')):
+                 fusion_types=('channel_add', 'channel_mul'),
+                 weight_type=False,
+                 eps=0.0001):
         super(ContextBlock, self).__init__()
         assert pooling_type in ['avg', 'att']
         assert isinstance(fusion_types, (list, tuple))
@@ -27,6 +28,7 @@ class ContextBlock(nn.Module):
         assert all([f in valid_fusion_types for f in fusion_types])
         assert len(fusion_types) > 0, 'at least one fusion should be used'
         assert levels > 0, 'at least one feature should be used'
+        assert weight_type in [False, 'before_attention', 'before_sigmoid', 'after_attention']
         self.repeated = repeated
         self.residual = residual
         self.inplanes = inplanes
@@ -35,6 +37,9 @@ class ContextBlock(nn.Module):
         self.pooling_type = pooling_type
         self.fusion_types = fusion_types
         self.levels = levels
+        self.weight_type = weight_type
+        self.eps = eps
+        self.relu = nn.ReLU(inplace=False)
         if pooling_type == 'att':
             self.conv_mask = nn.Conv2d(inplanes, 1, kernel_size=1)
             self.softmax = nn.Softmax(dim=2)
@@ -64,6 +69,13 @@ class ContextBlock(nn.Module):
                         nn.Conv2d(self.planes, self.inplanes // self.levels, kernel_size=1)))
         else:
             self.channel_mul_conv = None
+
+        if self.weight_type == 'before_attention' or self.weight_type == 'after_attention':
+            self.weight = nn.Parameter(torch.Tensor(self.levels).fill_(1.0))
+        elif self.weight_type == 'before_sigmoid':
+            self.weight = nn.Parameter(torch.Tensor(self.repeated, self.levels).fill_(1.0))
+            self.weight_add = nn.Parameter(torch.Tensor(self.repeated, self.levels).fill_(1.0))
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -104,31 +116,72 @@ class ContextBlock(nn.Module):
 
     def forward(self, x):
         # [N, C, 1, 1]
+        if self.weight_type == 'before_attention':
+            w = self.relu(self.weight)
+            w /= (w.sum() + self.eps)
+            x = [x[i] * w[i] for i in range(self.levels)]
         outs = x
         x = torch.cat(x, dim=1)
         context = self.spatial_pool(x)
 
         if self.channel_mul_conv is not None:
             # [N, C, 1, 1]
-            mul_maps = [torch.sigmoid(self.channel_mul_conv[0][i](context)) for i in range(self.levels)]
+            if self.weight_type == 'before_sigmoid':
+                w = self.relu(self.weight[0])
+                w /= (w.sum() + self.eps)
+                mul_maps = [torch.sigmoid(self.channel_mul_conv[0][i](context) * w[i])
+                            for i in range(self.levels)]
+            else:
+                mul_maps = [torch.sigmoid(self.channel_mul_conv[0][i](context)) for i in range(self.levels)]
             for repeat in range(1, self.repeated):
+                if self.weight_type == 'before_sigmoid':
+                    w = self.relu(self.weight[repeat])
+                    w /= (w.sum() + self.eps)
                 if self.residual:
-                    mul_maps_ = [torch.sigmoid(self.channel_mul_conv[repeat][i](torch.cat(mul_maps, dim=1)))
-                                 for i in range(self.levels)]
+                    if self.weight_type == 'before_sigmoid':
+                        mul_maps_ = [torch.sigmoid
+                                     (self.channel_mul_conv[repeat][i](torch.cat(mul_maps, dim=1)) * w[i])
+                                     for i in range(self.levels)]
+                    else:
+                        mul_maps_ = [torch.sigmoid(self.channel_mul_conv[repeat][i](torch.cat(mul_maps, dim=1)))
+                                     for i in range(self.levels)]
                     mul_maps = [mul_map + mul_map_ for mul_map, mul_map_ in zip(mul_maps, mul_maps_)]
                 else:
-                    mul_maps = [torch.sigmoid(self.channel_mul_conv[repeat][i](torch.cat(mul_maps, dim=1)))
-                                for i in range(self.levels)]
+                    if self.weight_type == 'before_sigmoid':
+                        mul_maps = [torch.sigmoid
+                                    (self.channel_mul_conv[repeat][i](torch.cat(mul_maps, dim=1)) * w[i])
+                                    for i in range(self.levels)]
+                    else:
+                        mul_maps = [torch.sigmoid(self.channel_mul_conv[repeat][i](torch.cat(mul_maps, dim=1)))
+                                    for i in range(self.levels)]
             outs = [out * mul_map for out, mul_map in zip(outs, mul_maps)]
+
         if self.channel_add_conv is not None:
             # [N, C, 1, 1]
             add_maps = [self.channel_add_conv[0][i](context) for i in range(self.levels)]
+            if self.weight_type == 'before_sigmoid':
+                w = self.relu(self.weight_add[0])
+                w /= (w.sum() + self.eps)
+                add_maps = [add_maps[i] * w[i] for i in range(self.levels)]
             for repeat in range(1, self.repeated):
                 if self.residual:
-                    add_maps_ = [self.channel_add_conv[repeat][i](torch.cat(add_maps, dim=1)) for i in range(self.levels)]
+                    add_maps_ = [self.channel_add_conv[repeat][i](torch.cat(add_maps, dim=1)) for i in
+                                 range(self.levels)]
                     add_maps = [add_map + add_map_ for add_map, add_map_ in zip(add_maps, add_maps_)]
                 else:
-                    add_maps = [self.channel_add_conv[repeat][i](torch.cat(add_maps, dim=1)) for i in range(self.levels)]
+                    add_maps = [self.channel_add_conv[repeat][i](torch.cat(add_maps, dim=1)) for i in
+                                range(self.levels)]
+
+                if self.weight_type == 'before_sigmoid':
+                    w = self.relu(self.weight_add[repeat])
+                    w /= (w.sum() + self.eps)
+                    add_maps = [add_maps[i] * w[i] for i in range(self.levels)]
+
             outs = [out + add_map for out, add_map in zip(outs, add_maps)]
+
+        if self.weight_type == 'after_attention':
+            w = self.relu(self.weight)
+            w /= (w.sum() + self.eps)
+            outs = [outs[i] * w[i] for i in range(self.levels)]
 
         return sum(outs)

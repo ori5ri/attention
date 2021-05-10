@@ -46,7 +46,7 @@ data = dict(
         ]),
     test=dict(
         type='CocoDataset',
-        ann_file='../../data/coco/annotations/instances_test2017.json',
+        ann_file='../../data/coco/annotations/image_info_test-dev2017.json',
         img_prefix='../../data/coco/test2017/',
         pipeline=[
             dict(type='LoadImageFromFile'),
