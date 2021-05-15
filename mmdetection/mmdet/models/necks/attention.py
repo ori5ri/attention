@@ -90,7 +90,8 @@ class Attention(nn.Module):
                  residual=False,
                  map_repeated=1,
                  map_residual=False,
-                 weight_type=False):
+                 weight_type=False,
+                 repeated_layer=1):
         super(Attention, self).__init__()
         assert isinstance(in_channels, list)
         assert attention_type in ['fusion', 'context','augmented', 'self']
@@ -102,7 +103,7 @@ class Attention(nn.Module):
         self.no_norm_on_lateral = no_norm_on_lateral
         self.fp16_enabled = False
         self.upsample_cfg = upsample_cfg.copy()
-
+        self.repeated_layer = repeated_layer
         if end_level == -1:
             self.backbone_end_level = self.num_ins
             assert num_outs >= self.num_ins - start_level
@@ -116,57 +117,60 @@ class Attention(nn.Module):
 
         self.fusion_attentions = nn.ModuleList()
         self.downsample_convs = nn.ModuleList()
-        for i in range(self.start_level, self.backbone_end_level):
-            d_conv = nn.ModuleList()
-            for j in range(self.start_level, self.backbone_end_level):
-                temp = []
-                for _ in range(i - j):
-                    temp.append(ConvModule(
-                        out_channels,
-                        out_channels,
-                        3,
-                        stride=2,
-                        padding=1,
-                        inplace=False))
-                d_conv.append(nn.Sequential(*temp))
-            if attention_type == 'fusion':
-                self.fusion_attentions.append(
-                    FusionAttention(
-                        gate_channels=out_channels * (self.num_ins - start_level),
-                        levels=self.num_ins - start_level,
-                        reduction_ratio=reduction_ratio,
-                        kernel_size=kernel_size,
-                        no_channel=no_channel,
-                        no_spatial=no_spatial,
-                        stacking=stacking,
-                        residual=residual,
-                        map_repeated=map_repeated,
-                        map_residual=map_residual
-                    )
-                )
-            elif attention_type == 'context':
-                self.fusion_attentions.append(
-                    ContextBlock(inplanes=out_channels * (self.num_ins - start_level),
-                                 levels=self.num_ins - start_level,
-                                 repeated=map_repeated,
-                                 residual=map_residual,
-                                 weight_type=weight_type)
-                )
-            elif attention_type == 'augmented':
-                self.fusion_attentions.append(
-                    AugmentedAttention(levels = self.num_ins - start_level, 
-                                        in_channels = out_channels * (self.num_ins - start_level), 
-                                        out_channels = out_channels,
-                                        map_repeated=map_repeated)
-                )
-            elif attention_type == 'self':
-                self.fusion_attentions.append(
-                    SelfAttention(levels = self.num_ins - start_level, 
-                                        in_channels = out_channels * (self.num_ins - start_level), 
-                                        out_channels = out_channels)
-                )
 
-            self.downsample_convs.append(d_conv)
+        for _ in range(self.repeated_layer):
+            self.fusion_attentions.append(nn.ModuleList())
+            self.downsample_convs.append(nn.ModuleList())
+            for i in range(self.start_level, self.backbone_end_level):
+                d_conv = nn.ModuleList()
+                for j in range(self.start_level, self.backbone_end_level):
+                    temp = []
+                    for _ in range(i - j):
+                        temp.append(ConvModule(
+                            out_channels,
+                            out_channels,
+                            3,
+                            stride=2,
+                            padding=1,
+                            inplace=False))
+                    d_conv.append(nn.Sequential(*temp))
+                if attention_type == 'fusion':
+                    self.fusion_attentions[-1].append(
+                        FusionAttention(
+                            gate_channels=out_channels * (self.num_ins - start_level),
+                            levels=self.num_ins - start_level,
+                            reduction_ratio=reduction_ratio,
+                            kernel_size=kernel_size,
+                            no_channel=no_channel,
+                            no_spatial=no_spatial,
+                            stacking=stacking,
+                            residual=residual,
+                            map_repeated=map_repeated,
+                            map_residual=map_residual
+                        )
+                    )
+                elif attention_type == 'context':
+                    self.fusion_attentions[-1].append(
+                        ContextBlock(inplanes=out_channels * (self.num_ins - start_level),
+                                    levels=self.num_ins - start_level,
+                                    repeated=map_repeated,
+                                    residual=map_residual,
+                                    weight_type=weight_type)
+                    )
+                elif attention_type == 'augmented':
+                    self.fusion_attentions[-1].append(
+                        AugmentedAttention(levels = self.num_ins - start_level, 
+                                            in_channels = out_channels * (self.num_ins - start_level), 
+                                            out_channels = out_channels,
+                                            map_repeated=map_repeated)
+                    )
+                elif attention_type == 'self':
+                    self.fusion_attentions[-1].append(
+                        SelfAttention(levels = self.num_ins - start_level, 
+                                            in_channels = out_channels * (self.num_ins - start_level), 
+                                            out_channels = out_channels)
+                    )
+                self.downsample_convs[-1].append(d_conv)
 
         self.add_extra_convs = add_extra_convs
         assert isinstance(add_extra_convs, (str, bool))
@@ -249,16 +253,19 @@ class Attention(nn.Module):
 
         # build top-down path
         used_backbone_levels = len(laterals)
-        outs = []
-        for i in range(used_backbone_levels):
-            shape = laterals[i].shape[2:]
-            samples = []
-            samples.extend([self.downsample_convs[i][j](laterals[j]) for j in
-                            range(i)])
-            samples.append(laterals[i])
-            samples.extend([F.interpolate(laterals[j], size=shape, **self.upsample_cfg) for j in
-                            range(i + 1, used_backbone_levels)])
-            outs.append(self.fusion_attentions[i](samples))
+        for l in range(self.repeated_layer):
+            outs = []
+            for i in range(used_backbone_levels):
+                shape = laterals[i].shape[2:]
+                samples = []
+                samples.extend([self.downsample_convs[l][i][j](laterals[j]) for j in
+                                range(i)])
+                samples.append(laterals[i])
+                samples.extend([F.interpolate(laterals[j], size=shape, **self.upsample_cfg) for j in
+                                range(i + 1, used_backbone_levels)])
+                outs.append(self.fusion_attentions[l][i](samples))
+            laterals = [outs[j] for j in range(used_backbone_levels)]
+            
 
         # build outputs+
         # part 1: from original levels
