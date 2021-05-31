@@ -161,6 +161,8 @@ class Attention(nn.Module):
                                             out_channels = out_channels)
                     )
 
+            self.fusion_attentions.append(nn.ModuleList()) 
+
             for i in range(self.start_level, self.backbone_end_level):
                 d_conv = nn.ModuleList()
                 for j in range(self.start_level, self.backbone_end_level):
@@ -175,8 +177,7 @@ class Attention(nn.Module):
                             inplace=False))
                     d_conv.append(nn.Sequential(*temp))
                 
-                if not self.sharing:    
-                    self.fusion_attentions.append(nn.ModuleList())    
+                if not self.sharing:
                     if attention_type == 'fusion':
                         self.fusion_attentions[-1].append(
                             FusionAttention(
