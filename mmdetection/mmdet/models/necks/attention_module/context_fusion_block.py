@@ -1,6 +1,7 @@
 import torch
 from mmcv.cnn import constant_init, kaiming_init
 from torch import nn
+import matplotlib.pyplot as plt
 
 
 def last_zero_init(m):
@@ -20,7 +21,8 @@ class ContextBlock(nn.Module):
                  pooling_type='att',
                  fusion_types=('channel_add', 'channel_mul'),
                  weight_type=False,
-                 eps=0.0001):
+                 eps=0.0001,
+                 viz=False):
         super(ContextBlock, self).__init__()
         assert pooling_type in ['avg', 'att']
         assert isinstance(fusion_types, (list, tuple))
@@ -40,6 +42,7 @@ class ContextBlock(nn.Module):
         self.weight_type = weight_type
         self.eps = eps
         self.relu = nn.ReLU(inplace=False)
+        self.viz = viz
         if pooling_type == 'att':
             self.conv_mask = nn.Conv2d(inplanes, 1, kernel_size=1)
             self.softmax = nn.Softmax(dim=2)
@@ -154,6 +157,47 @@ class ContextBlock(nn.Module):
                     else:
                         mul_maps = [torch.sigmoid(self.channel_mul_conv[repeat][i](torch.cat(mul_maps, dim=1)))
                                     for i in range(self.levels)]
+            if self.viz:
+                for i, (out, mul_map) in enumerate(zip(outs, mul_maps)):
+                    import numpy as np
+                    height = mul_map[0].squeeze().cpu().numpy()
+                    large_index = height.argsort()[-9:][::-1]
+                    small_index = height.argsort()[:9][::-1]
+                    label = range(18)
+                    left = range(18)
+                    print('-'*50+str(i) + '-'*50)
+                    print(large_index, small_index)
+                    plt.bar(left, height[np.concatenate((large_index, small_index))], tick_label=label, width=0.8, color=['red'])
+
+                    # plt.ylim([-1, 1])
+                    plt.xlabel('x')
+                    plt.ylabel('y')
+                    plt.title('good')
+
+                    plt.show()
+
+                    fig, axarr = plt.subplots(3, 3)
+                    for idx in range(9):
+                        axarr[idx // 3][idx % 3].imshow(out.squeeze()[large_index[idx]].squeeze().cpu())
+                    plt.show()
+
+                    fig, axarr = plt.subplots(3, 3)
+                    for idx in range(9):
+                        axarr[idx // 3][idx % 3].imshow(out.squeeze()[small_index[idx]].squeeze().cpu())
+                    plt.show()
+
+                    temp = out * mul_map
+
+                    fig, axarr = plt.subplots(3, 3)
+                    for idx in range(9):
+                        axarr[idx // 3][idx % 3].imshow(temp.squeeze()[large_index[idx]].squeeze().cpu())
+                    plt.show()
+
+                    fig, axarr = plt.subplots(3, 3)
+                    for idx in range(9):
+                        axarr[idx // 3][idx % 3].imshow(temp.squeeze()[small_index[idx]].squeeze().cpu())
+                    plt.show()
+
             outs = [out * mul_map for out, mul_map in zip(outs, mul_maps)]
 
         if self.channel_add_conv is not None:
@@ -176,6 +220,46 @@ class ContextBlock(nn.Module):
                     w = self.relu(self.weight_add[repeat])
                     w /= (w.sum() + self.eps)
                     add_maps = [add_maps[i] * w[i] for i in range(self.levels)]
+            if self.viz:
+                for i, (out, mul_map) in enumerate(zip(outs, add_maps)):
+                    import numpy as np
+                    height = mul_map[0].squeeze().cpu().numpy()
+                    large_index = height.argsort()[-9:][::-1]
+                    small_index = height.argsort()[:9][::-1]
+                    label = range(18)
+                    left = range(18)
+                    print('-'*50+str(i) + '-'*50)
+                    print(large_index, small_index)
+                    plt.bar(left, height[np.concatenate((large_index, small_index))], tick_label=label, width=0.8, color=['red'])
+
+                    # plt.ylim([-1, 1])
+                    plt.xlabel('x')
+                    plt.ylabel('y')
+                    plt.title('good')
+
+                    plt.show()
+
+                    fig, axarr = plt.subplots(3, 3)
+                    for idx in range(9):
+                        axarr[idx // 3][idx % 3].imshow(out.squeeze()[large_index[idx]].squeeze().cpu())
+                    plt.show()
+
+                    fig, axarr = plt.subplots(3, 3)
+                    for idx in range(9):
+                        axarr[idx // 3][idx % 3].imshow(out.squeeze()[small_index[idx]].squeeze().cpu())
+                    plt.show()
+
+                    temp = out * mul_map
+
+                    fig, axarr = plt.subplots(3, 3)
+                    for idx in range(9):
+                        axarr[idx // 3][idx % 3].imshow(temp.squeeze()[large_index[idx]].squeeze().cpu())
+                    plt.show()
+
+                    fig, axarr = plt.subplots(3, 3)
+                    for idx in range(9):
+                        axarr[idx // 3][idx % 3].imshow(temp.squeeze()[small_index[idx]].squeeze().cpu())
+                    plt.show()
 
             outs = [out + add_map for out, add_map in zip(outs, add_maps)]
 
