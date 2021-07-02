@@ -15,4 +15,14 @@ model = dict(
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=True),
         style='pytorch'),
+    neck=dict(
+        type='Attention',
+        in_channels=[256, 512, 1024, 2048],
+        out_channels=256,
+        num_outs=5,
+        attention_type='context',
+        fusion_types=['channel_add'],
+        add_extra_convs='on_lateral',
+        repeated_layer=2
+    )
 )

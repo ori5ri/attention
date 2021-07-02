@@ -3,8 +3,20 @@ _base_ = [
     './_base_/dataset_640.py',
     './_base_/schedule_1x.py', '../_base_/default_runtime.py'
 ]
+
+norm_cfg = dict(type='BN', requires_grad=True)
 model = dict(
     pretrained='open-mmlab://resnext101_32x4d',
+    neck=dict(
+        type='NASFPN',
+        # in_channels=[256, 512, 1024, 2048],
+        # out_channels=256,
+        # start_level=1,s
+        # num_outs=5,
+        # add_extra_convs='on_input',
+        stack_times=7,
+        norm_cfg=norm_cfg
+    ),
     backbone=dict(
         type='ResNeXt',
         depth=101,
@@ -14,5 +26,9 @@ model = dict(
         out_indices=(0, 1, 2, 3),
         frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=True),
-        style='pytorch'),
+        style='pytorch')
+)
+
+data = dict(
+    samples_per_gpu=2
 )
