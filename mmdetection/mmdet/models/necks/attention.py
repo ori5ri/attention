@@ -7,6 +7,7 @@ from mmcv.cnn import ConvModule, xavier_init
 from mmcv.runner import auto_fp16
 from .attention_module.fusion_attention import FusionAttention
 from .attention_module.context_fusion_block import ContextBlock
+from .attention_module.context_weight_block import ContextWeightBlcok
 from .attention_module.attention_augmented import AugmentedAttention
 from .attention_module.self_attention import SelfAttention
 from ..builder import NECKS
@@ -94,21 +95,29 @@ class Attention(nn.Module):
                  fusion_types=('channel_add', 'channel_mul'),
                  weight_type=False,
                  repeated_layer=1,
-                 sharing=False,
+                 add_fpn=[],
+                 down_sharing=False,
+                 attention_sharing=False,
+                 out_sharing=False,
                  viz=False):
         super(Attention, self).__init__()
         assert isinstance(in_channels, list)
-        assert attention_type in ['fusion', 'context', 'augmented', 'self']
+        assert attention_type in ['fusion', 'context', 'augmented', 'self', 'context_weight']
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.add_fpn = add_fpn
         self.num_ins = len(in_channels)
         self.num_outs = num_outs
         self.relu_before_extra_convs = relu_before_extra_convs
+        self.attention_type = attention_type
         self.no_norm_on_lateral = no_norm_on_lateral
         self.fp16_enabled = False
         self.upsample_cfg = upsample_cfg.copy()
         self.repeated_layer = repeated_layer
-        self.sharing = sharing
+        self.residual = residual
+        self.down_sharing = down_sharing
+        self.attention_sharing = attention_sharing
+        self.out_sharing = out_sharing
         self.viz = viz
         if end_level == -1:
             self.backbone_end_level = self.num_ins
@@ -123,67 +132,18 @@ class Attention(nn.Module):
 
         self.fusion_attentions = nn.ModuleList()
         self.downsample_convs = nn.ModuleList()
+        self.repeated_convs = nn.ModuleList()
 
-        for _ in range(self.repeated_layer):
-            self.downsample_convs.append(nn.ModuleList())
+        for r in range(self.repeated_layer):
+            if not self.down_sharing or r == 0:
+                self.downsample_convs.append(nn.ModuleList())
 
-            if self.sharing:
-                if attention_type == 'fusion':
-                    self.fusion_attentions.append(
-                        FusionAttention(
-                            gate_channels=out_channels * (self.num_ins - start_level),
-                            levels=self.num_ins - start_level,
-                            reduction_ratio=reduction_ratio,
-                            kernel_size=kernel_size,
-                            no_channel=no_channel,
-                            no_spatial=no_spatial,
-                            stacking=stacking,
-                            residual=residual,
-                            map_repeated=map_repeated,
-                            map_residual=map_residual
-                        )
-                    )
-                elif attention_type == 'context':
-                    self.fusion_attentions.append(
-                        ContextBlock(inplanes=out_channels * (self.num_ins - start_level),
-                                     levels=self.num_ins - start_level,
-                                     repeated=map_repeated,
-                                     residual=map_residual,
-                                     weight_type=weight_type,
-                                     fusion_types=fusion_types,
-                                     viz=False)
-                    )
-                elif attention_type == 'augmented':
-                    self.fusion_attentions.append(
-                        AugmentedAttention(levels=self.num_ins - start_level,
-                                           in_channels=out_channels * (self.num_ins - start_level),
-                                           out_channels=out_channels,
-                                           map_repeated=map_repeated)
-                    )
-                elif attention_type == 'self':
-                    self.fusion_attentions.append(
-                        SelfAttention(levels=self.num_ins - start_level,
-                                      in_channels=out_channels * (self.num_ins - start_level),
-                                      out_channels=out_channels)
-                    )
+            if not self.out_sharing or r == 0:
+                self.repeated_convs.append(nn.ModuleList())
 
-            self.fusion_attentions.append(nn.ModuleList())
-
-            for i in range(self.start_level, self.backbone_end_level):
-                d_conv = nn.ModuleList()
-                for j in range(self.start_level, self.backbone_end_level):
-                    temp = []
-                    for _ in range(i - j):
-                        temp.append(ConvModule(
-                            out_channels,
-                            out_channels,
-                            3,
-                            stride=2,
-                            padding=1,
-                            inplace=False))
-                    d_conv.append(nn.Sequential(*temp))
-
-                if not self.sharing:
+            if not self.attention_sharing or r == 0:
+                self.fusion_attentions.append(nn.ModuleList())
+                for i in range(self.start_level, self.backbone_end_level):
                     if attention_type == 'fusion':
                         self.fusion_attentions[-1].append(
                             FusionAttention(
@@ -209,6 +169,13 @@ class Attention(nn.Module):
                                          weight_type=weight_type,
                                          viz=False)
                         )
+                    elif attention_type == 'context_weight':
+                        self.fusion_attentions[-1].append(
+                            ContextWeightBlcok(inplanes=out_channels * (self.num_ins - start_level),
+                                               levels=self.num_ins - start_level,
+                                               weight_type=weight_type,
+                                               viz=False)
+                        )
                     elif attention_type == 'augmented':
                         self.fusion_attentions[-1].append(
                             AugmentedAttention(levels=self.num_ins - start_level,
@@ -222,7 +189,32 @@ class Attention(nn.Module):
                                           in_channels=out_channels * (self.num_ins - start_level),
                                           out_channels=out_channels)
                         )
-                self.downsample_convs[-1].append(d_conv)
+
+            for i in range(self.start_level, self.backbone_end_level):
+                d_conv = nn.ModuleList()
+                if r != self.repeated_layer - 1 and (not self.out_sharing or r == 0):
+                    self.repeated_convs[-1].append(ConvModule(
+                        out_channels,
+                        out_channels,
+                        3,
+                        padding=1,
+                        conv_cfg=conv_cfg,
+                        norm_cfg=norm_cfg,
+                        act_cfg=act_cfg,
+                        inplace=False))
+                for j in range(self.start_level, self.backbone_end_level):
+                    temp = []
+                    for _ in range(i - j):
+                        temp.append(ConvModule(
+                            out_channels,
+                            out_channels,
+                            3,
+                            stride=2,
+                            padding=1,
+                            inplace=False))
+                    d_conv.append(nn.Sequential(*temp))
+                if not self.down_sharing or r == 0:
+                    self.downsample_convs[-1].append(d_conv)
 
         self.add_extra_convs = add_extra_convs
         assert isinstance(add_extra_convs, (str, bool))
@@ -252,18 +244,22 @@ class Attention(nn.Module):
                 norm_cfg=norm_cfg if not self.no_norm_on_lateral else None,
                 act_cfg=act_cfg,
                 inplace=False)
-            fpn_conv = ConvModule(
-                out_channels,
-                out_channels,
-                3,
-                padding=1,
-                conv_cfg=conv_cfg,
-                norm_cfg=norm_cfg,
-                act_cfg=act_cfg,
-                inplace=False)
-
             self.lateral_convs.append(l_conv)
-            self.fpn_convs.append(fpn_conv)
+
+            if not self.out_sharing:
+                fpn_conv = ConvModule(
+                    out_channels,
+                    out_channels,
+                    3,
+                    padding=1,
+                    conv_cfg=conv_cfg,
+                    norm_cfg=norm_cfg,
+                    act_cfg=act_cfg,
+                    inplace=False)
+                self.fpn_convs.append(fpn_conv)
+            else:
+                self.fpn_convs.append(nn.ModuleList())
+
 
         # add extra conv layers (e.g., RetinaNet)
         extra_levels = num_outs - self.backbone_end_level + self.start_level
@@ -310,32 +306,68 @@ class Attention(nn.Module):
                     axarr[idx // 3][idx % 3].imshow(lateral.squeeze()[idx].squeeze().cpu())
                 plt.show()
 
+        if 'before' in self.add_fpn:
+            # build top-down path
+            used_backbone_levels = len(laterals)
+            for i in range(used_backbone_levels - 1, 0, -1):
+                # In some cases, fixing `scale factor` (e.g. 2) is preferred, but
+                #  it cannot co-exist with `size` in `F.interpolate`.
+                if 'scale_factor' in self.upsample_cfg:
+                    laterals[i - 1] += F.interpolate(laterals[i],
+                                                     **self.upsample_cfg)
+                else:
+                    prev_shape = laterals[i - 1].shape[2:]
+                    laterals[i - 1] += F.interpolate(
+                        laterals[i], size=prev_shape, **self.upsample_cfg)
+
         # build top-down path
         used_backbone_levels = len(laterals)
         for l in range(self.repeated_layer):
-            outs = []
-            if self.sharing:
-                for i in range(used_backbone_levels):
-                    shape = laterals[i].shape[2:]
-                    samples = []
-                    samples.extend([self.downsample_convs[l][i][j](laterals[j]) for j in
-                                    range(i)])
-                    samples.append(laterals[i])
-                    samples.extend([F.interpolate(laterals[j], size=shape, **self.upsample_cfg) for j in
-                                    range(i + 1, used_backbone_levels)])
-                    outs.append(self.fusion_attentions[l](samples))
-            else:
-                for i in range(used_backbone_levels):
-                    shape = laterals[i].shape[2:]
-                    samples = []
-                    samples.extend([self.downsample_convs[l][i][j](laterals[j]) for j in
-                                    range(i)])
-                    samples.append(laterals[i])
-                    samples.extend([F.interpolate(laterals[j], size=shape, **self.upsample_cfg) for j in
-                                    range(i + 1, used_backbone_levels)])
-                    outs.append(self.fusion_attentions[l][i](samples))
+            temps = []
+            for i in range(used_backbone_levels):
+                shape = laterals[i].shape[2:]
+                samples = []
+                # samples.extend([F.interpolate(laterals[j], size=shape, **self.upsample_cfg) for j in
+                #                 range(i)])
+                down_l = l
+                attention_l = l
+                out_l = l
+                if self.down_sharing:
+                    down_l = 0
+                if self.attention_sharing:
+                    attention_l = 0
+                if self.out_sharing:
+                    out_l = 0
+                samples.extend([self.downsample_convs[down_l][i][j](laterals[j]) for j in
+                                range(i)])
+                samples.append(laterals[i])
+                samples.extend([F.interpolate(laterals[j], size=shape, **self.upsample_cfg) for j in
+                                range(i + 1, used_backbone_levels)])
+                if self.residual:
+                    temps.append(self.fusion_attentions[attention_l][i](samples) + laterals[i])
+                else:
+                    temps.append(self.fusion_attentions[attention_l][i](samples))
 
-            laterals = [outs[j] for j in range(used_backbone_levels)]
+            if l != self.repeated_layer - 1:
+                laterals = [
+                    self.repeated_convs[out_l][i](temps[i]) for i in range(used_backbone_levels)
+                ]
+            else:
+                laterals = [temps[j] for j in range(used_backbone_levels)]
+
+        if 'after' in self.add_fpn:
+            # build top-down path
+            used_backbone_levels = len(laterals)
+            for i in range(used_backbone_levels - 1, 0, -1):
+                # In some cases, fixing `scale factor` (e.g. 2) is preferred, but
+                #  it cannot co-exist with `size` in `F.interpolate`.
+                if 'scale_factor' in self.upsample_cfg:
+                    laterals[i - 1] += F.interpolate(laterals[i],
+                                                     **self.upsample_cfg)
+                else:
+                    prev_shape = laterals[i - 1].shape[2:]
+                    laterals[i - 1] += F.interpolate(
+                        laterals[i], size=prev_shape, **self.upsample_cfg)
 
         if self.viz:
             for lateral in laterals:
@@ -345,9 +377,14 @@ class Attention(nn.Module):
                 plt.show()
         # build outputs+
         # part 1: from original levels
-        outs = [
-            self.fpn_convs[i](outs[i]) for i in range(used_backbone_levels)
-        ]
+        if self.out_sharing:
+            outs = [
+                self.repeated_convs[0][i](laterals[i]) for i in range(used_backbone_levels)
+            ]
+        else:
+            outs = [
+                self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels)
+            ]
         # part 2: add extra levels
         if self.num_outs > len(outs):
             # use max pool to get more levels on top of outputs
