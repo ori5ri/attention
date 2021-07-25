@@ -1,9 +1,8 @@
 import warnings
 
 import torch.nn as nn
-from mmcv.cnn import ConvModule, constant_init, kaiming_init
-from mmcv.runner import load_checkpoint
-from mmdet.utils import get_root_logger
+from mmcv.cnn import ConvModule
+from mmcv.runner import BaseModule
 from torch.nn.modules.batchnorm import _BatchNorm
 
 from ..builder import BACKBONES
@@ -11,9 +10,8 @@ from ..utils import InvertedResidual, make_divisible
 
 
 @BACKBONES.register_module()
-class MobileNetV2(nn.Module):
+class MobileNetV2(BaseModule):
     """MobileNetV2 backbone.
-
     Args:
         widen_factor (float): Width multiplier, multiply number of
             channels in each layer by this amount. Default: 1.0.
@@ -48,12 +46,32 @@ class MobileNetV2(nn.Module):
                  out_indices=(1, 2, 4, 7),
                  frozen_stages=-1,
                  conv_cfg=None,
-                 norm_cfg=dict(type='BN', requires_grad=True),
+                 norm_cfg=dict(type='BN'),
                  act_cfg=dict(type='ReLU6'),
                  norm_eval=False,
                  with_cp=False,
-                 ):
-        super(MobileNetV2, self).__init__()
+                 pretrained=None,
+                 init_cfg=None):
+        super(MobileNetV2, self).__init__(init_cfg)
+
+        self.pretrained = pretrained
+        assert not (init_cfg and pretrained), \
+            'init_cfg and pretrained cannot be setting at the same time'
+        if isinstance(pretrained, str):
+            warnings.warn('DeprecationWarning: pretrained is deprecated, '
+                          'please use "init_cfg" instead')
+            self.init_cfg = dict(type='Pretrained', checkpoint=pretrained)
+        elif pretrained is None:
+            if init_cfg is None:
+                self.init_cfg = [
+                    dict(type='Kaiming', layer='Conv2d'),
+                    dict(
+                        type='Constant',
+                        val=1,
+                        layer=['_BatchNorm', 'GroupNorm'])
+                ]
+        else:
+            raise TypeError('pretrained must be a str or None')
 
         self.widen_factor = widen_factor
         self.out_indices = out_indices
@@ -117,7 +135,6 @@ class MobileNetV2(nn.Module):
 
     def make_layer(self, out_channels, num_blocks, stride, expand_ratio):
         """Stack InvertedResidual blocks to build a layer for MobileNetV2.
-
         Args:
             out_channels (int): out_channels of block.
             num_blocks (int): number of blocks.
@@ -153,26 +170,6 @@ class MobileNetV2(nn.Module):
             layer.eval()
             for param in layer.parameters():
                 param.requires_grad = False
-
-    def init_weights(self, pretrained=None):
-        """Initialize the weights in backbone.
-
-        Args:
-            pretrained (str, optional): Path to pre-trained weights.
-                Defaults to None.
-        """
-        if isinstance(pretrained, str):
-            logger = get_root_logger()
-            load_checkpoint(self, pretrained, strict=False, logger=logger)
-        elif pretrained is None:
-            for m in self.modules():
-                if isinstance(m, nn.Conv2d):
-                    kaiming_init(m)
-                elif isinstance(m, (_BatchNorm, nn.GroupNorm)):
-                    constant_init(m, 1)
-        
-        else:
-            raise TypeError('pretrained must be a str or None')
 
     def forward(self, x):
         """Forward function."""
