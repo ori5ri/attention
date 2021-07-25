@@ -327,8 +327,6 @@ class Attention(nn.Module):
             for i in range(used_backbone_levels):
                 shape = laterals[i].shape[2:]
                 samples = []
-                # samples.extend([F.interpolate(laterals[j], size=shape, **self.upsample_cfg) for j in
-                #                 range(i)])
                 down_l = l
                 attention_l = l
                 out_l = l
@@ -347,7 +345,6 @@ class Attention(nn.Module):
                     temps.append(self.fusion_attentions[attention_l][i](samples) + laterals[i])
                 else:
                     temps.append(self.fusion_attentions[attention_l][i](samples))
-
             if l != self.repeated_layer - 1:
                 laterals = [
                     self.repeated_convs[out_l][i](temps[i]) for i in range(used_backbone_levels)
