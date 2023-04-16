@@ -24,7 +24,7 @@ The key of designing feature pyramid ar- chitecture is determining connections o
 
 1. This research propose AttentionFPN, a new connectionless and information-rich feature pyramid architecture using relations between multi-scale features.
 
-2. It is a general approach that can be applied to various backbones, and can be complementary to other object detectors.
+2. It is a general approach that can be applied to various backbones, and can be complementary to various object detectors.
 
 ---
 
